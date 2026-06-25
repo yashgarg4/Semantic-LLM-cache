@@ -1,0 +1,41 @@
+# Packaging config. semcache is installed editable (`pip install -e .`) so that
+# `import semcache` resolves identically from the demo, the tests, the proxy and
+# any external project that wraps it — no sys.path hacks. Exact, reproducible
+# version pins live in requirements.txt; the abstract deps below describe the
+# package's real runtime needs.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semcache"
+version = "0.1.0"
+description = "A dual-layer (exact + semantic) cache for LLM calls."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers",
+    "faiss-cpu",
+    "numpy",
+    "pydantic>=2",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn[standard]"]
+dashboard = ["streamlit"]
+demo = ["langchain-google-genai"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["semcache*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Disable faulthandler under pytest. On Windows the native tokenizers/torch
+# extensions raise *first-chance* SEH access violations that they handle
+# internally; pytest's faulthandler can't distinguish first-chance from fatal
+# and dumps an alarming but harmless traceback. Tests pass and the process never
+# actually crashes (exit 0), and the standalone demo — which doesn't enable
+# faulthandler — runs clean. See INTERNAL_NOTES.md Phase 1 bug log.
+addopts = "-p no:faulthandler"

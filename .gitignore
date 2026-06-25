@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+
+# Secrets / local config
+.env
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Persisted cache artifacts
+*.faiss
+*.db
+
+# Packaging / tooling
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# OS noise
+.DS_Store
+Thumbs.db
+INTERNAL_NOTES.md
