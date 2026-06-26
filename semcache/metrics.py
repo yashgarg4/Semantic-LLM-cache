@@ -35,6 +35,15 @@ def estimate_cost(model: str, tokens: int) -> float:
     return tokens / 1_000_000 * rate
 
 
+def estimate_tokens(text: str) -> int:
+    """Roughly estimate token count from text (~4 chars/token for English).
+
+    Used to value cache savings when the wrapped function or LLM response does
+    not report exact token usage. Approximate by design.
+    """
+    return max(1, len(text) // 4)
+
+
 @dataclass
 class LookupRecord:
     """One recorded cache lookup."""

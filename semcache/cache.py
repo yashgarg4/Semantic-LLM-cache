@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict
 from .config import CacheConfig
 from .embedder import Embedder
 from .metrics import Metrics
-from .store import CacheEntry, CacheStore
+from .store import CacheStore
 
 # An llm_fn takes the query string and returns (response, tokens, cost).
 LLMFn = Callable[[str], "tuple[str, int, float]"]
@@ -39,6 +39,10 @@ class CacheResult(BaseModel):
     score: Optional[float]
     query: str
     matched_query: Optional[str] = None
+    # Tokens/cost for this response: the matched entry's on a hit, the fresh
+    # call's on a miss. Lets callers (e.g. the proxy) populate usage fields.
+    tokens: Optional[int] = None
+    cost: Optional[float] = None
 
     @property
     def is_hit(self) -> bool:
@@ -63,15 +67,12 @@ class SemCache:
         self.llm_fn = llm_fn
         self.metrics = Metrics()
 
-    def _lookup(
-        self, query: str
-    ) -> "tuple[CacheResult, Optional[object], Optional[CacheEntry]]":
-        """Run both layers. Returns ``(result, embedding, matched_entry)``.
+    def _lookup(self, query: str) -> "tuple[CacheResult, Optional[object]]":
+        """Run both layers. Returns ``(result, embedding)``.
 
-        * ``embedding`` lets ``call()`` reuse the vector to store a miss without
-          embedding twice; it is ``None`` only on an exact hit (none computed).
-        * ``matched_entry`` is the cached entry that was hit (for crediting
-          token/cost savings); ``None`` on a miss.
+        ``embedding`` lets ``call()`` reuse the vector to store a miss without
+        embedding twice; it is ``None`` only on an exact hit (none computed).
+        On a hit the result carries the matched entry's tokens/cost.
         """
         # Layer 1: exact match — instant, free, zero false positives.
         entry = self.store.exact_get(query)
@@ -83,9 +84,10 @@ class SemCache:
                     score=1.0,
                     query=query,
                     matched_query=entry.query,
+                    tokens=entry.tokens,
+                    cost=entry.cost,
                 ),
                 None,
-                entry,
             )
 
         # Layer 2: semantic match — embed once, cosine search via FAISS.
@@ -100,9 +102,10 @@ class SemCache:
                     score=score,
                     query=query,
                     matched_query=entry.query,
+                    tokens=entry.tokens,
+                    cost=entry.cost,
                 ),
                 embedding,
-                entry,
             )
 
         return (
@@ -114,40 +117,43 @@ class SemCache:
                 matched_query=None,
             ),
             embedding,
-            None,
         )
 
     def get(self, query: str) -> CacheResult:
         """Look up a query against the cache without ever calling the LLM."""
-        result, _, _ = self._lookup(query)
+        result, _ = self._lookup(query)
         return result
 
-    def call(self, query: str) -> CacheResult:
-        """Look up a query; on a full miss call ``llm_fn``, store, and return it.
+    def call(self, query: str, llm_fn: Optional[LLMFn] = None) -> CacheResult:
+        """Look up a query; on a full miss call the LLM, store, and return it.
 
-        Records the lookup in ``self.metrics`` either way. ``latency_ms`` is the
-        cache's own lookup time (it excludes the downstream LLM call on a miss).
+        ``llm_fn`` overrides the instance's ``self.llm_fn`` for this call only
+        (used by the ``@cached`` decorator and the proxy, which supply their own
+        LLM per call without mutating shared state). Records the lookup in
+        ``self.metrics`` either way. ``latency_ms`` is the cache's own lookup
+        time and excludes the downstream LLM call on a miss.
         """
+        fn = llm_fn if llm_fn is not None else self.llm_fn
+
         start = time.perf_counter()
-        result, embedding, matched = self._lookup(query)
+        result, embedding = self._lookup(query)
         latency_ms = (time.perf_counter() - start) * 1000.0
 
         if result.is_hit:
-            # Credit the tokens/cost the avoided call would have incurred.
             self.metrics.record(
                 query=query,
                 hit_type=result.hit_type,
                 score=result.score,
                 matched_query=result.matched_query,
-                tokens_saved=matched.tokens if matched else 0,
-                cost_saved=matched.cost if matched else 0.0,
+                tokens_saved=result.tokens or 0,
+                cost_saved=result.cost or 0.0,
                 latency_ms=latency_ms,
             )
             return result
 
-        if self.llm_fn is None:
+        if fn is None:
             raise RuntimeError("cache miss and no llm_fn was configured")
-        response, tokens, cost = self.llm_fn(query)
+        response, tokens, cost = fn(query)
         if embedding is None:  # defensive; a miss always carries an embedding
             embedding = self.embedder.embed(query)
         self.store.add(
@@ -172,4 +178,6 @@ class SemCache:
             score=None,
             query=query,
             matched_query=None,
+            tokens=tokens,
+            cost=cost,
         )

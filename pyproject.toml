@@ -28,7 +28,7 @@ demo = ["langchain-google-genai"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]
-include = ["semcache*"]
+include = ["semcache*", "server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
