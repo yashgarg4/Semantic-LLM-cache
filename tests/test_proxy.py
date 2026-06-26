@@ -6,10 +6,12 @@ OpenAI-shaped response, and the mounted metrics routes.
 """
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from semcache import CacheConfig, SemCache
-from server.proxy import create_app
+from semcache.metrics import GEMINI_PRICING_USD_PER_1M
+from server.proxy import _tokens_and_cost, create_app
 
 
 def _make_fake_complete():
@@ -90,3 +92,22 @@ def test_metrics_and_recent_routes() -> None:
     recent = client.get("/recent?n=5").json()["recent"]
     assert len(recent) == 2
     assert recent[-1]["hit_type"] == "exact"
+
+
+def test_tokens_and_cost_uses_real_input_output_split() -> None:
+    in_rate, out_rate = GEMINI_PRICING_USD_PER_1M["gemini-2.5-flash-lite"]
+    usage = {"input_tokens": 2000, "output_tokens": 800, "total_tokens": 2800}
+
+    total, cost = _tokens_and_cost(usage, "gemini-2.5-flash-lite", "q", "a")
+
+    assert total == 2800
+    # Billing-accurate: input and output priced at their own rates.
+    assert cost == pytest.approx(2000 / 1e6 * in_rate + 800 / 1e6 * out_rate)
+
+
+def test_tokens_and_cost_falls_back_to_estimates_when_usage_missing() -> None:
+    # No usage metadata -> estimate from text, but must not crash and must still
+    # price input/output separately.
+    total, cost = _tokens_and_cost({}, "gemini-2.5-flash-lite", "hello", "world world")
+    assert total > 0
+    assert cost > 0

@@ -15,14 +15,17 @@ Run:  python examples/integration_live_research.py
 """
 from __future__ import annotations
 
-from semcache import CacheConfig, SemCache, estimate_cost
+from semcache import CacheConfig, SemCache, estimate_cost_split
 from server.dashboard import replay_hit_rate, simulated_false_positive_risk
 
-# A full Searcher->Critic->Synthesizer run is input-heavy (search results in
-# context). ~8k tokens/run is a conservative representative figure; the live
-# integration uses the same SEMCACHE_TOKENS_PER_RUN default.
-TOKENS_PER_RUN = 8_000
-MODEL = "gemini-2.5-flash-lite"  # live-research-intel's model family
+# A full Searcher->Critic->Synthesizer run is input-heavy (search results fill
+# the context) with a moderate synthesised report as output. Representative
+# split, priced with separate input/output rates.
+INPUT_TOKENS_PER_RUN = 6_500
+OUTPUT_TOKENS_PER_RUN = 1_500
+TOKENS_PER_RUN = INPUT_TOKENS_PER_RUN + OUTPUT_TOKENS_PER_RUN
+MODEL = "gemini-3.1-flash-lite"  # live-research-intel's model family
+COST_PER_RUN = estimate_cost_split(MODEL, INPUT_TOKENS_PER_RUN, OUTPUT_TOKENS_PER_RUN)
 
 # 20 queries: clusters of repeats/paraphrases plus unique topics — a realistic
 # overlapping research workload, NOT hand-tuned to inflate the hit rate.
@@ -65,7 +68,7 @@ def fake_research_run(question: str) -> tuple[str, int, float]:
     answer text.
     """
     report = f"[synthesised research report for: {question}]"
-    return report, TOKENS_PER_RUN, estimate_cost(MODEL, TOKENS_PER_RUN)
+    return report, TOKENS_PER_RUN, COST_PER_RUN
 
 
 def main() -> None:
@@ -73,7 +76,10 @@ def main() -> None:
 
     print("=" * 92)
     print("semcache + live-research-intel: research-query cache (offline measurement)")
-    print(f"threshold=0.92 | ~{TOKENS_PER_RUN:,} tokens/run | model={MODEL}")
+    print(
+        f"threshold=0.92 | ~{TOKENS_PER_RUN:,} tokens/run "
+        f"({INPUT_TOKENS_PER_RUN:,} in + {OUTPUT_TOKENS_PER_RUN:,} out) | model={MODEL}"
+    )
     print("=" * 92)
     print(f"{'#':<3}{'research question':<62}{'outcome':<10}{'score'}")
     print("-" * 92)
@@ -98,10 +104,10 @@ def main() -> None:
         f"${savings['cost_saved_usd']:.4f} saved on this batch."
     )
     # Projection makes the at-scale impact concrete without overclaiming.
-    per_1k = (avoided / counts["total"]) * 1000 * TOKENS_PER_RUN
+    runs_per_1k = (avoided / counts["total"]) * 1000
     print(
-        f"At this hit rate, ~{per_1k / 1e6:.1f}M tokens "
-        f"(${estimate_cost(MODEL, int(per_1k)):.2f}) saved per 1,000 research queries."
+        f"At this hit rate, ~{runs_per_1k * TOKENS_PER_RUN / 1e6:.1f}M tokens "
+        f"(${runs_per_1k * COST_PER_RUN:.2f}) saved per 1,000 research queries."
     )
 
     print("\nThreshold sensitivity (replaying this batch):")

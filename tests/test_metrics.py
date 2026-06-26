@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from semcache.metrics import GEMINI_PRICING_USD_PER_1M, Metrics, estimate_cost
+from semcache.metrics import (
+    GEMINI_PRICING_USD_PER_1M,
+    Metrics,
+    estimate_cost,
+    estimate_cost_split,
+)
 
 
 def _rec(m: Metrics, hit_type: str, *, tokens=0, cost=0.0, score=None, query="q"):
@@ -60,16 +65,32 @@ def test_recent_returns_last_n_in_order() -> None:
     assert "matched_query" in recent[0] and "score" in recent[0]
 
 
-def test_estimate_cost_uses_table_and_default_fallback() -> None:
-    # 1M tokens at the flash rate equals exactly the per-1M rate.
+def test_estimate_cost_split_prices_input_and_output_separately() -> None:
+    in_rate, out_rate = GEMINI_PRICING_USD_PER_1M["gemini-2.5-flash-lite"]
+    # 1M input + 1M output == input_rate + output_rate.
+    assert estimate_cost_split("gemini-2.5-flash-lite", 1_000_000, 1_000_000) == pytest.approx(
+        in_rate + out_rate
+    )
+    # Output tokens cost more than the same number of input tokens.
+    assert estimate_cost_split("gemini-2.5-flash-lite", 0, 1_000_000) > estimate_cost_split(
+        "gemini-2.5-flash-lite", 1_000_000, 0
+    )
+    # A concrete bill: 1000 in + 500 out at (0.10, 0.40) per 1M.
+    assert estimate_cost_split("gemini-2.5-flash-lite", 1_000, 500) == pytest.approx(
+        1_000 / 1e6 * in_rate + 500 / 1e6 * out_rate
+    )
+
+
+def test_estimate_cost_split_unknown_model_falls_back_to_default() -> None:
+    default_in, default_out = GEMINI_PRICING_USD_PER_1M["gemini-1.5-flash"]
+    assert estimate_cost_split("does-not-exist", 1_000_000, 1_000_000) == pytest.approx(
+        default_in + default_out
+    )
+
+
+def test_estimate_cost_blended_is_between_input_and_output_rates() -> None:
+    in_rate, out_rate = GEMINI_PRICING_USD_PER_1M["gemini-1.5-flash"]
+    # Total-only fallback applies the average of the two rates.
     assert estimate_cost("gemini-1.5-flash", 1_000_000) == pytest.approx(
-        GEMINI_PRICING_USD_PER_1M["gemini-1.5-flash"]
-    )
-    # Cost scales linearly with tokens.
-    assert estimate_cost("gemini-1.5-pro", 500_000) == pytest.approx(
-        GEMINI_PRICING_USD_PER_1M["gemini-1.5-pro"] / 2
-    )
-    # Unknown model falls back to the default model's rate.
-    assert estimate_cost("does-not-exist", 1_000_000) == pytest.approx(
-        GEMINI_PRICING_USD_PER_1M["gemini-1.5-flash"]
+        (in_rate + out_rate) / 2
     )

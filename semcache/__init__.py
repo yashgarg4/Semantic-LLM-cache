@@ -28,14 +28,14 @@ from typing import Callable, Optional
 from .cache import CacheResult, SemCache
 from .config import CacheConfig
 from .embedder import Embedder
-from .metrics import Metrics, estimate_cost, estimate_tokens
+from .metrics import Metrics, estimate_cost, estimate_cost_split, estimate_tokens
 from .store import CacheEntry, CacheStore, normalise_query
 
 __version__ = "0.1.0"
 
 # Default model used to price avoided calls when a decorated function does not
 # report token usage of its own.
-_DECORATOR_PRICING_MODEL = "gemini-1.5-flash"
+_DECORATOR_PRICING_MODEL = "gemini-3.1-flash-lite"
 
 # Module-level caches shared by the decorator. The default (no threshold
 # override) cache is created lazily so importing semcache does not load the
@@ -113,6 +113,7 @@ __all__ = [
     "normalise_query",
     "Metrics",
     "estimate_cost",
+    "estimate_cost_split",
     "estimate_tokens",
     "cached",
     "get_default_cache",

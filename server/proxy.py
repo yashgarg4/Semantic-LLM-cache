@@ -19,16 +19,20 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import uuid
 from functools import lru_cache
 from typing import Callable, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from semcache import CacheConfig, SemCache, estimate_cost, estimate_tokens
+from semcache import CacheConfig, SemCache, estimate_cost_split, estimate_tokens
 from server.dashboard import metrics_router
+
+load_dotenv()  # pick up GOOGLE_API_KEY from a local .env if present
 
 logger = logging.getLogger("semcache.proxy")
 
@@ -36,6 +40,35 @@ logger = logging.getLogger("semcache.proxy")
 _HIT_HEADER = {"exact": "hit-exact", "semantic": "hit-semantic", "miss": "miss"}
 
 _warned_fake = False
+
+
+class _RateLimiter:
+    """Spaces calls so real Gemini requests stay under the free-tier RPM limit.
+
+    Thread-safe: uvicorn serves the sync endpoint from a threadpool, so
+    concurrent misses could hit Gemini at once; the lock serialises them and
+    enforces a minimum gap between calls.
+    """
+
+    def __init__(self, max_per_minute: int, safety_sec: float = 0.5) -> None:
+        # e.g. 10 RPM -> 6.0s + 0.5s cushion = 6.5s gap (~9.2 calls/min).
+        self._interval = 60.0 / max(1, max_per_minute) + safety_sec
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_allowed - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._next_allowed = now + self._interval
+
+
+# gemini-3.1-flash-lite free tier: 15 RPM. Cap just under it (override via env).
+_GEMINI_RPM = int(os.getenv("SEMCACHE_GEMINI_RPM", "15"))
+_gemini_limiter = _RateLimiter(_GEMINI_RPM)
 
 # A completion fn takes (query, model) and returns (response, tokens, cost).
 CompletionFn = Callable[[str, str], "tuple[str, int, float]"]
@@ -51,7 +84,7 @@ class ChatCompletionRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    model: str = "gemini-1.5-flash"
+    model: str = "gemini-3.1-flash-lite"
     messages: list[ChatMessage]
     temperature: Optional[float] = Field(default=None)
 
@@ -72,20 +105,62 @@ def _get_gemini(model: str):
     return ChatGoogleGenerativeAI(model=model)
 
 
+def _tokens_and_cost(
+    usage: dict, model: str, query: str, text: str
+) -> tuple[int, float]:
+    """Derive (total_tokens, cost) from LLM usage metadata.
+
+    Uses the real input/output token split when present (and prices each with
+    its own rate); falls back to char-based estimates only for missing fields.
+    """
+    in_tok = usage.get("input_tokens")
+    out_tok = usage.get("output_tokens")
+    if in_tok is None:
+        in_tok = estimate_tokens(query)
+    if out_tok is None:
+        out_tok = estimate_tokens(text)
+    in_tok, out_tok = int(in_tok), int(out_tok)
+    total = int(usage.get("total_tokens") or (in_tok + out_tok))
+    return total, estimate_cost_split(model, in_tok, out_tok)
+
+
+def _content_to_text(content) -> str:
+    """Flatten LLM message content (a str, or a list of content parts) to text.
+
+    Newer Gemini models can return ``content`` as a list of blocks rather than a
+    plain string; storing a non-string would fail CacheResult validation.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                value = item.get("text") or item.get("content") or ""
+                if isinstance(value, str):
+                    parts.append(value)
+        return "".join(parts)
+    return str(content) if content else ""
+
+
 def _gemini_complete(query: str, model: str) -> tuple[str, int, float]:
-    """Call Gemini and report (text, tokens, cost)."""
+    """Call Gemini and report (text, total_tokens, cost) — cost from the real
+    input/output token split in the usage metadata."""
+    _gemini_limiter.acquire()  # respect the free-tier requests-per-minute cap
     result = _get_gemini(model).invoke(query)
-    text = getattr(result, "content", None) or str(result)
+    text = _content_to_text(getattr(result, "content", ""))
     usage = getattr(result, "usage_metadata", None) or {}
-    tokens = int(usage.get("total_tokens") or (estimate_tokens(query) + estimate_tokens(text)))
-    return text, tokens, estimate_cost(model, tokens)
+    total, cost = _tokens_and_cost(usage, model, query, text)
+    return text, total, cost
 
 
 def _fake_complete(query: str, model: str) -> tuple[str, int, float]:
     """Keyless fallback so the proxy + dashboard are runnable without Gemini."""
-    text = f"[semcache fake LLM — set GOOGLE_API_KEY for real Gemini] Re: {query}"
-    tokens = estimate_tokens(query) + estimate_tokens(text)
-    return text, tokens, estimate_cost(model, tokens)
+    text = f"[semcache fake LLM - set GOOGLE_API_KEY for real Gemini] Re: {query}"
+    in_tok, out_tok = estimate_tokens(query), estimate_tokens(text)
+    return text, in_tok + out_tok, estimate_cost_split(model, in_tok, out_tok)
 
 
 def _default_complete(query: str, model: str) -> tuple[str, int, float]:
@@ -105,9 +180,14 @@ def _default_complete(query: str, model: str) -> tuple[str, int, float]:
 def _to_openai_response(result, model: str) -> dict:
     """Shape a CacheResult into an OpenAI chat.completion object."""
     text = result.response or ""
-    prompt_tokens = estimate_tokens(result.query)
-    completion_tokens = estimate_tokens(text)
-    total_tokens = result.tokens if result.tokens is not None else prompt_tokens + completion_tokens
+    total_tokens = (
+        result.tokens
+        if result.tokens is not None
+        else estimate_tokens(result.query) + estimate_tokens(text)
+    )
+    # Keep the split internally consistent (sum to the accurate total).
+    prompt_tokens = min(estimate_tokens(result.query), total_tokens)
+    completion_tokens = max(0, total_tokens - prompt_tokens)
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",

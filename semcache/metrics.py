@@ -6,9 +6,10 @@ Every lookup is recorded so we can report:
 * **savings** — tokens, USD, and LLM calls avoided by serving from cache;
 * **recent** — the last N lookups, for inspection and the dashboard.
 
-Cost is estimated from a small per-model token->USD table (Gemini rates). The
-rates are *approximate blended* (input+output) figures and are easy to update;
-they exist so the cache can put a dollar value on the calls it avoided.
+Cost is estimated from a small per-model table of (input, output) USD rates
+(approximate published Gemini rates). Prefer ``estimate_cost_split`` when you
+have the input/output token split (providers bill them differently);
+``estimate_cost`` is a rough total-only fallback.
 """
 from __future__ import annotations
 
@@ -16,25 +17,45 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-# Approximate blended Gemini rates in USD per 1,000,000 tokens. These are
-# deliberately rough (pricing changes; input vs output differs) — good enough to
-# value avoided calls, and trivial to update.
-GEMINI_PRICING_USD_PER_1M: dict[str, float] = {
-    "gemini-1.5-flash": 0.15,
-    "gemini-1.5-pro": 2.50,
-    "gemini-2.0-flash-lite": 0.075,
-    "gemini-2.0-flash": 0.20,
-    "gemini-2.5-flash-lite": 0.10,
-    "gemini-2.5-flash": 0.30,
-    "gemini-2.5-pro": 3.50,
+# Approximate published Gemini rates in USD per 1,000,000 tokens, as
+# (input_rate, output_rate). Output tokens are billed several times higher than
+# input. Deliberately approximate (pricing changes) and trivial to update.
+GEMINI_PRICING_USD_PER_1M: dict[str, tuple[float, float]] = {
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-2.0-flash-lite": (0.075, 0.30),
+    "gemini-2.0-flash": (0.10, 0.40),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-3.5-flash": (1.50, 9.00),  # standard paid tier (free tier is $0)
+    "gemini-3.1-flash-lite": (0.25, 1.50),  # standard paid tier, text (free tier $0)
 }
 DEFAULT_MODEL = "gemini-1.5-flash"
 
 
+def _rates(model: str) -> tuple[float, float]:
+    """(input, output) USD-per-1M rates for ``model`` (unknown -> default)."""
+    return GEMINI_PRICING_USD_PER_1M.get(model, GEMINI_PRICING_USD_PER_1M[DEFAULT_MODEL])
+
+
+def estimate_cost_split(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Accurate USD cost from separate input/output token counts.
+
+    Preferred whenever the split is known (e.g. from an LLM's usage metadata),
+    since providers bill input and output tokens at different rates.
+    """
+    in_rate, out_rate = _rates(model)
+    return input_tokens / 1_000_000 * in_rate + output_tokens / 1_000_000 * out_rate
+
+
 def estimate_cost(model: str, tokens: int) -> float:
-    """Estimate the USD cost of ``tokens`` for ``model`` (unknown -> default)."""
-    rate = GEMINI_PRICING_USD_PER_1M.get(model, GEMINI_PRICING_USD_PER_1M[DEFAULT_MODEL])
-    return tokens / 1_000_000 * rate
+    """Rough USD cost for a TOTAL token count when the input/output split is
+    unknown — applies the average of the input and output rates. Prefer
+    :func:`estimate_cost_split` whenever the split is available.
+    """
+    in_rate, out_rate = _rates(model)
+    return tokens / 1_000_000 * (in_rate + out_rate) / 2
 
 
 def estimate_tokens(text: str) -> int:

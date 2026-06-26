@@ -14,7 +14,7 @@ from __future__ import annotations
 from semcache import CacheConfig, SemCache, estimate_cost, normalise_query
 
 # The "model" our fake LLM pretends to be, used to price avoided calls.
-DEMO_MODEL = "gemini-1.5-flash"
+DEMO_MODEL = "gemini-3.1-flash-lite"
 
 # Canned "knowledge base" so the fake LLM returns sensible text for the two
 # base queries. Anything else gets a generic answer.

@@ -203,7 +203,7 @@ class SemCache:
         *,
         tokens: Optional[int] = None,
         cost: Optional[float] = None,
-        model: str = "gemini-1.5-flash",
+        model: str = "gemini-3.1-flash-lite",
     ) -> None:
         """Insert a precomputed answer into the cache (embeds the query).
 

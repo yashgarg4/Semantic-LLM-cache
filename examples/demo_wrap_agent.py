@@ -13,9 +13,13 @@ from __future__ import annotations
 import os
 import time
 
+from dotenv import load_dotenv
+
 from semcache import cached, get_default_cache, normalise_query
 
+load_dotenv()  # pick up GOOGLE_API_KEY from a local .env if present
 USE_GEMINI = bool(os.getenv("GOOGLE_API_KEY"))
+DEMO_MODEL = os.getenv("SEMCACHE_DEMO_MODEL", "gemini-3.1-flash-lite")
 
 _CANNED = {
     "what is your return policy?": (
@@ -34,7 +38,7 @@ _invocations = {"count": 0}
 def _gemini_answer(query: str) -> str:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
+    llm = ChatGoogleGenerativeAI(model=DEMO_MODEL, temperature=0.3)
     return llm.invoke(query).content
 
 
