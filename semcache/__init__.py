@@ -14,6 +14,7 @@ phases and will be exported from here too.
 from .cache import CacheResult, SemCache
 from .config import CacheConfig
 from .embedder import Embedder
+from .metrics import Metrics, estimate_cost
 from .store import CacheEntry, CacheStore, normalise_query
 
 __version__ = "0.1.0"
@@ -26,4 +27,6 @@ __all__ = [
     "CacheStore",
     "CacheEntry",
     "normalise_query",
+    "Metrics",
+    "estimate_cost",
 ]

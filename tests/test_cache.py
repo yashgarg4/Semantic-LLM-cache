@@ -70,3 +70,22 @@ def test_get_never_invokes_llm(config: CacheConfig) -> None:
     assert result.hit_type == "miss"
     assert result.response is None
     assert state["calls"] == 0
+
+
+def test_call_records_metrics_with_savings(config: CacheConfig) -> None:
+    # Each call returns 100 tokens / $0.01 so savings are easy to check.
+    def llm(query: str):
+        return "answer", 100, 0.01
+
+    cache = SemCache(config=config, llm_fn=llm)
+    cache.call("How do I reset my password?")               # miss (stored)
+    cache.call("How do I reset my password?")               # exact hit
+    cache.call("I forgot my password, how do I reset it?")  # semantic hit
+
+    counts = cache.metrics.counts()
+    assert counts == {"exact": 1, "semantic": 1, "miss": 1, "total": 3}
+
+    savings = cache.metrics.savings()
+    assert savings["calls_avoided"] == 2          # the two hits
+    assert savings["tokens_saved"] == 200         # 2 hits * 100 tokens
+    assert savings["cost_saved_usd"] == pytest.approx(0.02)

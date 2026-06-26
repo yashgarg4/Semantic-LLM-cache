@@ -11,7 +11,10 @@ Run:  python examples/demo_basic.py
 """
 from __future__ import annotations
 
-from semcache import CacheConfig, SemCache, normalise_query
+from semcache import CacheConfig, SemCache, estimate_cost, normalise_query
+
+# The "model" our fake LLM pretends to be, used to price avoided calls.
+DEMO_MODEL = "gemini-1.5-flash"
 
 # Canned "knowledge base" so the fake LLM returns sensible text for the two
 # base queries. Anything else gets a generic answer.
@@ -32,8 +35,8 @@ def fake_llm(query: str) -> tuple[str, int, float]:
     response = CANNED.get(
         normalise_query(query), f"(generic answer to: {query})"
     )
-    tokens = 120          # pretend the call used ~120 tokens
-    cost = 0.0003         # pretend it cost $0.0003
+    tokens = 200  # pretend prompt + completion came to ~200 tokens
+    cost = estimate_cost(DEMO_MODEL, tokens)
     return response, tokens, cost
 
 
@@ -73,10 +76,19 @@ def main() -> None:
             print(f"     -> matched cached query: {result.matched_query!r}")
 
     print("-" * 78)
+
+    # --- Phase 2: metrics summary -------------------------------------------
+    hr = cache.metrics.hit_rate()
+    counts = cache.metrics.counts()
+    savings = cache.metrics.savings()
     print(
-        f"Result: {tally['exact']} exact, {tally['semantic']} semantic, "
-        f"{tally['miss']} miss  (cache holds {len(cache.store)} entries)"
+        f"Hit rate: {hr['total'] * 100:.0f}% "
+        f"({counts['exact']} exact, {counts['semantic']} semantic, "
+        f"{counts['miss']} miss) - {savings['calls_avoided']} calls avoided, "
+        f"~{savings['tokens_saved']} tokens saved, "
+        f"${savings['cost_saved_usd']:.6f} saved"
     )
+    print(f"Cache holds {len(cache.store)} entries.")
     print("=" * 78)
 
 
