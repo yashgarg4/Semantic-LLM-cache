@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .config import CacheConfig
 from .embedder import Embedder
-from .metrics import Metrics
+from .metrics import Metrics, estimate_cost, estimate_tokens
 from .store import CacheStore
 
 # An llm_fn takes the query string and returns (response, tokens, cost).
@@ -192,6 +192,34 @@ class SemCache:
             score=None,
             query=query,
             matched_query=result.matched_query,
+            tokens=tokens,
+            cost=cost,
+        )
+
+    def put(
+        self,
+        query: str,
+        response: str,
+        *,
+        tokens: Optional[int] = None,
+        cost: Optional[float] = None,
+        model: str = "gemini-1.5-flash",
+    ) -> None:
+        """Insert a precomputed answer into the cache (embeds the query).
+
+        For callers that already have the answer in hand (e.g. an agent
+        pipeline that produced a report) rather than going through ``call()``.
+        ``tokens``/``cost`` are estimated from ``response`` if not supplied.
+        """
+        if tokens is None:
+            tokens = estimate_tokens(response)
+        if cost is None:
+            cost = estimate_cost(model, tokens)
+        embedding = self.embedder.embed(query)
+        self.store.add(
+            query=query,
+            embedding=embedding,
+            response=response,
             tokens=tokens,
             cost=cost,
         )

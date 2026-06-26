@@ -22,7 +22,9 @@ from typing import Optional
 GEMINI_PRICING_USD_PER_1M: dict[str, float] = {
     "gemini-1.5-flash": 0.15,
     "gemini-1.5-pro": 2.50,
+    "gemini-2.0-flash-lite": 0.075,
     "gemini-2.0-flash": 0.20,
+    "gemini-2.5-flash-lite": 0.10,
     "gemini-2.5-flash": 0.30,
     "gemini-2.5-pro": 3.50,
 }
