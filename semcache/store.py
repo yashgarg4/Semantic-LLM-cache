@@ -145,24 +145,34 @@ class CacheStore:
             self._touch(entry)
         return entry
 
-    def semantic_get(
-        self, embedding: np.ndarray, threshold: float
-    ) -> Optional[tuple[CacheEntry, float]]:
-        """Layer 2: nearest-neighbour cosine search. Hit iff score >= threshold.
+    def search(self, embedding: np.ndarray) -> Optional[tuple[float, CacheEntry]]:
+        """Return the top-1 ``(score, entry)`` by cosine, ignoring any threshold.
 
-        Returns ``None`` on an empty index (the first-ever query is always a
-        miss and must not crash).
+        Does NOT update LRU — it is also used read-only to record the
+        near-miss score for the threshold explorer. Returns ``None`` on an empty
+        index (the first-ever query is always a miss and must not crash).
         """
         if self._index.ntotal == 0:
             return None
         q = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
         scores, idxs = self._index.search(q, 1)
         idx = int(idxs[0][0])
-        score = float(scores[0][0])
         if idx < 0:  # FAISS sentinel when no neighbour exists
             return None
+        return float(scores[0][0]), self._entries[idx]
+
+    def semantic_get(
+        self, embedding: np.ndarray, threshold: float
+    ) -> Optional[tuple[CacheEntry, float]]:
+        """Layer 2: nearest-neighbour cosine search. Hit iff score >= threshold.
+
+        On a hit it bumps LRU and returns ``(entry, score)``; otherwise ``None``.
+        """
+        best = self.search(embedding)
+        if best is None:
+            return None
+        score, entry = best
         if score >= threshold:
-            entry = self._entries[idx]
             self._touch(entry)
             return entry, score
         return None

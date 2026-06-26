@@ -17,6 +17,7 @@ Run:  uvicorn server.proxy:app --reload
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 import uuid
@@ -29,8 +30,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from semcache import CacheConfig, SemCache, estimate_cost, estimate_tokens
 from server.dashboard import metrics_router
 
+logger = logging.getLogger("semcache.proxy")
+
 # Maps internal hit_type to the x-semcache header value.
 _HIT_HEADER = {"exact": "hit-exact", "semantic": "hit-semantic", "miss": "miss"}
+
+_warned_fake = False
 
 # A completion fn takes (query, model) and returns (response, tokens, cost).
 CompletionFn = Callable[[str, str], "tuple[str, int, float]"]
@@ -68,17 +73,33 @@ def _get_gemini(model: str):
 
 
 def _gemini_complete(query: str, model: str) -> tuple[str, int, float]:
-    """Default completion: call Gemini and report (text, tokens, cost)."""
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise HTTPException(
-            status_code=503,
-            detail="GOOGLE_API_KEY is not set; cannot reach Gemini on a miss.",
-        )
+    """Call Gemini and report (text, tokens, cost)."""
     result = _get_gemini(model).invoke(query)
     text = getattr(result, "content", None) or str(result)
     usage = getattr(result, "usage_metadata", None) or {}
     tokens = int(usage.get("total_tokens") or (estimate_tokens(query) + estimate_tokens(text)))
     return text, tokens, estimate_cost(model, tokens)
+
+
+def _fake_complete(query: str, model: str) -> tuple[str, int, float]:
+    """Keyless fallback so the proxy + dashboard are runnable without Gemini."""
+    text = f"[semcache fake LLM — set GOOGLE_API_KEY for real Gemini] Re: {query}"
+    tokens = estimate_tokens(query) + estimate_tokens(text)
+    return text, tokens, estimate_cost(model, tokens)
+
+
+def _default_complete(query: str, model: str) -> tuple[str, int, float]:
+    """Use Gemini if a key is configured, else a clearly-labelled fake LLM."""
+    global _warned_fake
+    if os.getenv("GOOGLE_API_KEY"):
+        return _gemini_complete(query, model)
+    if not _warned_fake:
+        logger.warning(
+            "GOOGLE_API_KEY not set - proxy is serving a FAKE local LLM on cache "
+            "misses. Set GOOGLE_API_KEY to call real Gemini."
+        )
+        _warned_fake = True
+    return _fake_complete(query, model)
 
 
 def _to_openai_response(result, model: str) -> dict:
@@ -115,7 +136,7 @@ def create_app(
 ) -> FastAPI:
     """Build the proxy app. ``complete`` is injectable (tests pass a fake)."""
     cache = cache or SemCache(CacheConfig())
-    complete = complete or _gemini_complete
+    complete = complete or _default_complete
 
     app = FastAPI(title="semcache OpenAI-compatible proxy")
 

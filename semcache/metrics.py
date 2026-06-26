@@ -50,7 +50,8 @@ class LookupRecord:
 
     query: str
     hit_type: str  # "exact" | "semantic" | "miss"
-    score: Optional[float]
+    score: Optional[float]  # the match score for hits (1.0 exact, cosine semantic)
+    best_score: Optional[float]  # top neighbour cosine, recorded even on a miss
     matched_query: Optional[str]
     tokens_saved: int
     cost_saved: float
@@ -77,6 +78,7 @@ class Metrics:
         tokens_saved: int,
         cost_saved: float,
         latency_ms: float,
+        best_score: Optional[float] = None,
     ) -> None:
         """Append one lookup to the log."""
         self._records.append(
@@ -84,6 +86,7 @@ class Metrics:
                 query=query,
                 hit_type=hit_type,
                 score=score,
+                best_score=best_score,
                 matched_query=matched_query,
                 tokens_saved=tokens_saved,
                 cost_saved=cost_saved,

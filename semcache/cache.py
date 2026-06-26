@@ -67,12 +67,17 @@ class SemCache:
         self.llm_fn = llm_fn
         self.metrics = Metrics()
 
-    def _lookup(self, query: str) -> "tuple[CacheResult, Optional[object]]":
-        """Run both layers. Returns ``(result, embedding)``.
+    def _lookup(
+        self, query: str
+    ) -> "tuple[CacheResult, Optional[object], Optional[float]]":
+        """Run both layers. Returns ``(result, embedding, best_score)``.
 
-        ``embedding`` lets ``call()`` reuse the vector to store a miss without
-        embedding twice; it is ``None`` only on an exact hit (none computed).
-        On a hit the result carries the matched entry's tokens/cost.
+        * ``embedding`` lets ``call()`` reuse the vector to store a miss without
+          embedding twice; it is ``None`` only on an exact hit (none computed).
+        * ``best_score`` is the top neighbour's cosine similarity — recorded for
+          *every* non-exact lookup (even a miss) so the dashboard's threshold
+          explorer can replay history at other thresholds. ``None`` on an exact
+          hit or an empty index.
         """
         # Layer 1: exact match — instant, free, zero false positives.
         entry = self.store.exact_get(query)
@@ -87,6 +92,7 @@ class SemCache:
                     tokens=entry.tokens,
                     cost=entry.cost,
                 ),
+                None,
                 None,
             )
 
@@ -106,22 +112,28 @@ class SemCache:
                     cost=entry.cost,
                 ),
                 embedding,
+                score,
             )
 
+        # Miss: remember the nearest (below-threshold) neighbour for the explorer.
+        near = self.store.search(embedding)
+        best_score = near[0] if near is not None else None
+        near_query = near[1].query if near is not None else None
         return (
             CacheResult(
                 hit_type="miss",
                 response=None,
                 score=None,
                 query=query,
-                matched_query=None,
+                matched_query=near_query,
             ),
             embedding,
+            best_score,
         )
 
     def get(self, query: str) -> CacheResult:
         """Look up a query against the cache without ever calling the LLM."""
-        result, _ = self._lookup(query)
+        result, _, _ = self._lookup(query)
         return result
 
     def call(self, query: str, llm_fn: Optional[LLMFn] = None) -> CacheResult:
@@ -136,7 +148,7 @@ class SemCache:
         fn = llm_fn if llm_fn is not None else self.llm_fn
 
         start = time.perf_counter()
-        result, embedding = self._lookup(query)
+        result, embedding, best_score = self._lookup(query)
         latency_ms = (time.perf_counter() - start) * 1000.0
 
         if result.is_hit:
@@ -144,6 +156,7 @@ class SemCache:
                 query=query,
                 hit_type=result.hit_type,
                 score=result.score,
+                best_score=best_score,
                 matched_query=result.matched_query,
                 tokens_saved=result.tokens or 0,
                 cost_saved=result.cost or 0.0,
@@ -167,7 +180,8 @@ class SemCache:
             query=query,
             hit_type="miss",
             score=None,
-            matched_query=None,
+            best_score=best_score,
+            matched_query=result.matched_query,
             tokens_saved=0,
             cost_saved=0.0,
             latency_ms=latency_ms,
@@ -177,7 +191,7 @@ class SemCache:
             response=response,
             score=None,
             query=query,
-            matched_query=None,
+            matched_query=result.matched_query,
             tokens=tokens,
             cost=cost,
         )
