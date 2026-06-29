@@ -99,10 +99,16 @@ def _extract_user_query(messages: list[ChatMessage]) -> str:
 
 @lru_cache(maxsize=4)
 def _get_gemini(model: str):
-    """Lazily construct (and cache) a Gemini chat model."""
+    """Lazily construct (and cache) a Gemini chat model.
+
+    ``max_retries=0`` so a 429 (e.g. daily free-tier quota exhausted) fails fast
+    with a clean error instead of langchain retrying with ~minute-long backoffs
+    (which otherwise makes an exhausted-quota request hang for minutes). Our own
+    ``_RateLimiter`` already handles per-minute spacing.
+    """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    return ChatGoogleGenerativeAI(model=model)
+    return ChatGoogleGenerativeAI(model=model, max_retries=0)
 
 
 def _tokens_and_cost(
