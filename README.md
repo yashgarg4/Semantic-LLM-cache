@@ -6,7 +6,6 @@
 ![tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)
 ![embeddings](https://img.shields.io/badge/embeddings-BGE--small%20(local)-orange)
 ![vector%20search](https://img.shields.io/badge/vector%20search-FAISS-informational)
-![license](https://img.shields.io/badge/license-MIT-lightgrey)
 
 semcache sits in front of any LLM and avoids redundant calls by recognising when
 a new query is *semantically* the same as one already answered — not just
@@ -148,7 +147,10 @@ make proxy        # uvicorn server.proxy:app  (also serves /metrics and /recent)
 Point any OpenAI client at it by changing `base_url` to `http://localhost:8000/v1`.
 Each response carries `x-semcache: hit-exact | hit-semantic | miss`. On a miss it
 calls Gemini (set `GOOGLE_API_KEY`); without a key it serves a clearly-labelled
-fake LLM so the proxy and dashboard are runnable with zero setup.
+fake LLM so the proxy and dashboard are runnable with zero setup. Real Gemini
+calls are rate-limited (default 15 RPM, via `SEMCACHE_GEMINI_RPM`) to stay under
+free-tier per-minute limits. To view the dashboard with data, run the proxy,
+send it traffic (e.g. `python examples/seed_proxy.py`), then `make dashboard`.
 
 ### 3. Measured integration — `live-research-intel`
 
@@ -164,11 +166,13 @@ MEASURED hit rate: 50%  (4 exact, 6 semantic, 10 miss of 20)
 Research pipelines avoided: 10/20
 ```
 
-The hit rate is genuinely measured (real bge-small embeddings, 0.92 threshold);
-at a representative ~8k tokens per research run that is an estimated **~4.0M
-tokens (~$0.40) saved per 1,000 research queries**. Paraphrases such as *"What
-are the most recent developments in LLMs?"* matched *"What are the latest
-developments in large language models?"* at cosine 0.99.
+The hit rate is genuinely measured (real bge-small embeddings, 0.92 threshold).
+At a representative ~8k tokens per research run (6.5k in / 1.5k out) priced at
+`gemini-3.1-flash-lite` rates ($0.25 in / $1.50 out per 1M), the 10 avoided
+pipelines save ~80k tokens (~$0.039) on the batch — about **~4.0M tokens
+(~$1.94) saved per 1,000 research queries**. Paraphrases such as *"What are the
+most recent developments in LLMs?"* matched *"What are the latest developments
+in large language models?"* at cosine 0.99.
 
 ---
 
@@ -191,8 +195,9 @@ semcache/
 ├── examples/
 │   ├── demo_basic.py              # core cache + metrics demo
 │   ├── demo_wrap_agent.py         # @cached decorator demo
+│   ├── seed_proxy.py              # populate a running proxy so the dashboard has data
 │   └── integration_live_research.py  # measured integration batch
-├── tests/               # 31 tests (cache, store, embedder, metrics, proxy, dashboard)
+├── tests/               # 35 tests (cache, store, embedder, metrics, proxy, dashboard)
 ├── requirements.txt · pyproject.toml · Makefile · INTERNAL_NOTES.md
 ```
 
@@ -207,6 +212,7 @@ semcache/
 | `SemCache.call(query, llm_fn=None)` | Look up; on a miss call the LLM, store, record metrics. |
 | `SemCache.put(query, response, *, tokens=None, cost=None, model=...)` | Insert a precomputed answer. |
 | `SemCache.metrics` | `Metrics`: `hit_rate()`, `counts()`, `savings()`, `recent(n)`. |
+| `estimate_cost_split(model, in_tokens, out_tokens)` | Billing-accurate USD cost from the real input/output token split. |
 | `@cached` / `@cached(threshold=...)` | Decorator over `fn(query, ...)`. |
 | `CacheResult` | `.hit_type`, `.response`, `.score`, `.matched_query`, `.tokens`, `.cost`, `.is_hit`. |
 | `POST /v1/chat/completions` | OpenAI-compatible proxy endpoint; sets `x-semcache`. |
@@ -231,8 +237,10 @@ Other env vars:
 |---|---|---|
 | `GOOGLE_API_KEY` | proxy / demos | Real Gemini calls (optional; fake fallback otherwise). |
 | `SEMCACHE_API` | dashboard | Base URL of the metrics API (default `http://localhost:8000`). |
+| `SEMCACHE_GEMINI_RPM` | proxy | Cap real Gemini calls to N requests/min to stay under free-tier limits (default 15). |
 | `SEMCACHE_ENABLED` | live-research-intel hook | Turn the report cache on. |
 | `SEMCACHE_TOKENS_PER_RUN` | live-research-intel hook | Representative tokens per full research run. |
+| `SEMCACHE_MODEL` | live-research-intel hook | Model id used to price the cached report. |
 
 ---
 
@@ -242,9 +250,9 @@ Other env vars:
 make test        # or: pytest -q
 ```
 
-31 tests cover exact/semantic/miss behaviour, LRU eviction, query normalisation,
-empty-index safety, unit-norm embeddings, metrics math, the proxy's `x-semcache`
-header, and the dashboard's threshold-replay logic.
+35 tests cover exact/semantic/miss behaviour, LRU eviction, query normalisation,
+empty-index safety, unit-norm embeddings, metrics math, split input/output cost,
+the proxy's `x-semcache` header, and the dashboard's threshold-replay logic.
 
 ---
 
@@ -266,5 +274,4 @@ header, and the dashboard's threshold-replay logic.
 The embedding model on the critical path is small and local on purpose: a remote
 embedding API would reintroduce the very network latency the cache exists to
 remove. Embeddings are unit-normalised so a FAISS inner-product search equals
-cosine similarity (asserted in the embedder). See `INTERNAL_NOTES.md` for the full
-design rationale, the per-phase build log, known limitations, and interview Q&A.
+cosine similarity (asserted in the embedder).
